@@ -82,23 +82,20 @@ class AptenAPIStreamlit:
         success, data, error = self._make_request_with_retry('GET', self.lookup_endpoint, params=params)
         
         if success and data:
-            if 'leads' in data and len(data['leads']) > 0:
-                lead_id = data['leads'][0].get('id')
-                if lead_id:
-                    return True, lead_id, ""
-                else:
-                    return False, None, "Lead found but no ID returned"
+            lead_id = data.get('id', '')
+            if lead_id:
+                return True, lead_id, ""
             else:
-                return False, None, "No leads found with this phone number"
-        else:
-            return False, None, error
+                return False, None, "No lead ID in response"
+        
+        return False, None, error
     
     def switch_profile(self, lead_id: str, target_profile: str) -> Tuple[bool, str]:
         """Switch a lead's customer profile."""
         url = self.switch_profile_endpoint.format(leadId=lead_id)
         
         payload = {
-            "customerProfile": target_profile,
+            "profile": target_profile,
             "sendMessage": True,
             "messageDelayHours": 0,
             "messageDelayMins": 0,
@@ -149,7 +146,11 @@ def process_csv(df: pd.DataFrame, api_key: str):
         # Clean phone number
         phone = ''.join(filter(str.isdigit, str(row.get('Mobile Phone', ''))))
         
-        if not phone:
+        # Remove leading 1 if it's an 11-digit number (US country code)
+        if len(phone) == 11 and phone.startswith('1'):
+            phone = phone[1:]
+        
+        if not phone or len(phone) != 10:
             failed_count += 1
             results.append({
                 'Row Number': idx + 2,
@@ -159,7 +160,7 @@ def process_csv(df: pd.DataFrame, api_key: str):
                 'Target Profile': row.get('Customer Profile', ''),
                 'Lead ID': '',
                 'Status': 'FAILED',
-                'Error Message': 'Invalid phone number'
+                'Error Message': f'Invalid phone number (must be 10 digits, got {len(phone) if phone else 0})'
             })
             continue
         
@@ -239,10 +240,12 @@ def main():
         2. **Upload CSV File**: Must contain columns:
            - First Name
            - Last Name
-           - Mobile Phone
+           - Mobile Phone (10-digit US numbers, with or without country code)
            - Customer Profile (or Customer Profile - MOVE)
         3. **Click Process**: The tool will process each lead and switch their profile
         4. **Download Results**: Get a detailed log of all processed leads
+        
+        **Note**: Phone numbers will be automatically cleaned to 10 digits (removing country code if present)
         """)
     
     # API Key input
