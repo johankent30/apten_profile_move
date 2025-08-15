@@ -86,7 +86,8 @@ class AptenAPIStreamlit:
             if lead_id:
                 return True, lead_id, ""
             else:
-                return False, None, "No lead ID in response"
+                # Log the actual response for debugging
+                return False, None, f"No lead ID in response. Response: {str(data)[:100]}"
         
         return False, None, error
     
@@ -146,11 +147,7 @@ def process_csv(df: pd.DataFrame, api_key: str):
         # Clean phone number
         phone = ''.join(filter(str.isdigit, str(row.get('Mobile Phone', ''))))
         
-        # Remove leading 1 if it's an 11-digit number (US country code)
-        if len(phone) == 11 and phone.startswith('1'):
-            phone = phone[1:]
-        
-        if not phone or len(phone) != 10:
+        if not phone:
             failed_count += 1
             results.append({
                 'Row Number': idx + 2,
@@ -160,7 +157,7 @@ def process_csv(df: pd.DataFrame, api_key: str):
                 'Target Profile': row.get('Customer Profile', ''),
                 'Lead ID': '',
                 'Status': 'FAILED',
-                'Error Message': f'Invalid phone number (must be 10 digits, got {len(phone) if phone else 0})'
+                'Error Message': 'Invalid phone number'
             })
             continue
         
@@ -240,12 +237,10 @@ def main():
         2. **Upload CSV File**: Must contain columns:
            - First Name
            - Last Name
-           - Mobile Phone (10-digit US numbers, with or without country code)
+           - Mobile Phone
            - Customer Profile (or Customer Profile - MOVE)
         3. **Click Process**: The tool will process each lead and switch their profile
         4. **Download Results**: Get a detailed log of all processed leads
-        
-        **Note**: Phone numbers will be automatically cleaned to 10 digits (removing country code if present)
         """)
     
     # API Key input
