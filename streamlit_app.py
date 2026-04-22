@@ -27,6 +27,8 @@ class AptenAPIStreamlit:
         }
         self.lookup_endpoint = f"{API_BASE_URL}/leads/lookup"
         self.switch_profile_endpoint = f"{API_BASE_URL}/leads/{{leadId}}/switchCustomerProfile"
+        self.get_lead_endpoint = f"{API_BASE_URL}/leads/{{leadId}}"
+        self.remove_tags_endpoint = f"{API_BASE_URL}/leads/{{leadId}}/tags/remove"
     
     def _make_request_with_retry(self, method: str, url: str, **kwargs) -> Tuple[bool, Optional[dict], str]:
         """Make an HTTP request with retry logic."""
@@ -94,7 +96,7 @@ class AptenAPIStreamlit:
     def switch_profile(self, lead_id: str, target_profile: str) -> Tuple[bool, str]:
         """Switch a lead's customer profile."""
         url = self.switch_profile_endpoint.format(leadId=lead_id)
-        
+
         payload = {
             "profile": target_profile,
             "sendMessage": True,
@@ -102,30 +104,91 @@ class AptenAPIStreamlit:
             "messageDelayMins": 0,
             "clearMemory": False
         }
-        
+
         success, data, error = self._make_request_with_retry('POST', url, json=payload)
-        
+
         if success:
             return True, ""
         else:
             return False, error
-    
-    def process_lead(self, lead_data: Dict[str, str]) -> Tuple[bool, str, str]:
-        """Process a single lead."""
+
+    def get_lead_tag_ids(self, lead_id: str) -> Tuple[bool, List[str], str]:
+        """Fetch a lead and return its current tag IDs."""
+        url = self.get_lead_endpoint.format(leadId=lead_id)
+        success, data, error = self._make_request_with_retry('GET', url)
+
+        if not success:
+            return False, [], error
+
+        tags = data.get('tags', []) if data else []
+        tag_ids = [t.get('id') for t in tags if t.get('id')]
+        return True, tag_ids, ""
+
+    def remove_tags(self, lead_id: str, tag_ids: List[str]) -> Tuple[bool, str]:
+        """Remove specific tags from a lead."""
+        url = self.remove_tags_endpoint.format(leadId=lead_id)
+        success, data, error = self._make_request_with_retry('POST', url, json={"tagIds": tag_ids})
+
+        if success:
+            return True, ""
+        else:
+            return False, error
+
+    def process_lead(self, lead_data: Dict[str, str]) -> Dict[str, str]:
+        """Process a single lead: switch profile, then remove all current tags."""
         phone = lead_data['phone']
         target_profile = lead_data['target_profile']
-        
+
+        result = {
+            'lead_id': '',
+            'status': 'FAILED',
+            'profile_status': 'FAILED',
+            'tag_removal_status': '',
+            'tags_removed_count': 0,
+            'error_message': '',
+        }
+
         # Lookup lead
         success, lead_id, error = self.lookup_lead(phone)
         if not success:
-            return False, "", error
-        
+            result['error_message'] = f"Lookup failed: {error}"
+            return result
+
+        result['lead_id'] = lead_id
+
         # Switch profile
         success, error = self.switch_profile(lead_id, target_profile)
-        if success:
-            return True, lead_id, ""
-        else:
-            return False, lead_id, error
+        if not success:
+            result['error_message'] = f"Profile switch failed: {error}"
+            return result
+
+        result['profile_status'] = 'SUCCESS'
+
+        # Fetch current tags
+        success, tag_ids, error = self.get_lead_tag_ids(lead_id)
+        if not success:
+            result['status'] = 'PARTIAL'
+            result['tag_removal_status'] = 'FAILED'
+            result['error_message'] = f"Profile switched but failed to fetch tags: {error}"
+            return result
+
+        # Remove tags if any
+        if not tag_ids:
+            result['status'] = 'SUCCESS'
+            result['tag_removal_status'] = 'N/A'
+            return result
+
+        success, error = self.remove_tags(lead_id, tag_ids)
+        if not success:
+            result['status'] = 'PARTIAL'
+            result['tag_removal_status'] = 'FAILED'
+            result['error_message'] = f"Profile switched but tag removal failed: {error}"
+            return result
+
+        result['status'] = 'SUCCESS'
+        result['tag_removal_status'] = 'SUCCESS'
+        result['tags_removed_count'] = len(tag_ids)
+        return result
 
 def process_csv(df: pd.DataFrame, api_key: str):
     """Process the uploaded CSV file."""
@@ -140,13 +203,14 @@ def process_csv(df: pd.DataFrame, api_key: str):
     
     total_rows = len(df)
     successful_count = 0
+    partial_count = 0
     failed_count = 0
-    
+
     # Process each row
     for idx, row in df.iterrows():
         # Clean phone number
         phone = ''.join(filter(str.isdigit, str(row.get('Mobile Phone', ''))))
-        
+
         if not phone:
             failed_count += 1
             results.append({
@@ -157,15 +221,18 @@ def process_csv(df: pd.DataFrame, api_key: str):
                 'Target Profile': row.get('Customer Profile', ''),
                 'Lead ID': '',
                 'Status': 'FAILED',
+                'Profile Switch': 'FAILED',
+                'Tag Removal': '',
+                'Tags Removed': 0,
                 'Error Message': 'Invalid phone number'
             })
             continue
-        
+
         # Get target profile
         target_profile = row.get('Customer Profile', '').strip()
         if not target_profile:
             target_profile = row.get('Customer Profile - MOVE', '').strip()
-        
+
         if not target_profile:
             failed_count += 1
             results.append({
@@ -176,60 +243,66 @@ def process_csv(df: pd.DataFrame, api_key: str):
                 'Target Profile': '',
                 'Lead ID': '',
                 'Status': 'FAILED',
+                'Profile Switch': 'FAILED',
+                'Tag Removal': '',
+                'Tags Removed': 0,
                 'Error Message': 'No target profile specified'
             })
             continue
-        
+
         lead_data = {
             'phone': phone,
             'target_profile': target_profile,
             'first_name': row.get('First Name', ''),
             'last_name': row.get('Last Name', '')
         }
-        
+
         # Update status
         lead_name = f"{lead_data['first_name']} {lead_data['last_name']}".strip()
         status_text.text(f"Processing {idx + 1}/{total_rows}: {lead_name}")
-        
+
         # Process the lead
-        success, lead_id, error_message = api.process_lead(lead_data)
-        
-        if success:
+        outcome = api.process_lead(lead_data)
+
+        if outcome['status'] == 'SUCCESS':
             successful_count += 1
-            status = "SUCCESS"
+        elif outcome['status'] == 'PARTIAL':
+            partial_count += 1
         else:
             failed_count += 1
-            status = "FAILED"
-        
+
         results.append({
             'Row Number': idx + 2,
             'First Name': lead_data['first_name'],
             'Last Name': lead_data['last_name'],
             'Phone': phone,
             'Target Profile': target_profile,
-            'Lead ID': lead_id,
-            'Status': status,
-            'Error Message': error_message
+            'Lead ID': outcome['lead_id'],
+            'Status': outcome['status'],
+            'Profile Switch': outcome['profile_status'],
+            'Tag Removal': outcome['tag_removal_status'],
+            'Tags Removed': outcome['tags_removed_count'],
+            'Error Message': outcome['error_message']
         })
-        
+
         # Update progress
         progress = (idx + 1) / total_rows
         progress_bar.progress(progress)
-        
+
         # Small delay to avoid rate limiting
         if idx < total_rows - 1:
             time.sleep(0.1)
-    
+
     # Clear progress indicators
     progress_bar.empty()
     status_text.empty()
-    
-    return results, successful_count, failed_count
+
+    return results, successful_count, partial_count, failed_count
 
 def main():
     st.title("🔄 Apten Profile Switcher")
-    st.markdown("Upload a CSV file and switch customer profiles in bulk")
-    
+    st.markdown("Upload a CSV file to switch customer profiles and clear all tags in bulk")
+
     # Instructions
     with st.expander("📋 Instructions", expanded=False):
         st.markdown("""
@@ -239,8 +312,10 @@ def main():
            - Last Name
            - Mobile Phone
            - Customer Profile (or Customer Profile - MOVE)
-        3. **Click Process**: The tool will process each lead and switch their profile
-        4. **Download Results**: Get a detailed log of all processed leads
+        3. **Click Process**: For each lead, the tool will:
+           - Switch their customer profile
+           - Remove **all** tags currently on the lead
+        4. **Download Results**: Get a detailed log of each step per lead
         """)
     
     # API Key input
@@ -288,27 +363,35 @@ def main():
                     start_time = datetime.now()
                     
                     # Process the CSV
-                    results, successful_count, failed_count = process_csv(df, api_key)
-                    
+                    results, successful_count, partial_count, failed_count = process_csv(df, api_key)
+
                     end_time = datetime.now()
                     duration = end_time - start_time
-                    
+
                     # Show summary
                     st.success("✅ Processing Complete!")
-                    
-                    col1, col2, col3, col4 = st.columns(4)
+
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     with col1:
                         st.metric("Total Processed", len(results))
                     with col2:
                         st.metric("Successful", successful_count)
                     with col3:
-                        st.metric("Failed", failed_count)
+                        st.metric("Partial", partial_count)
                     with col4:
+                        st.metric("Failed", failed_count)
+                    with col5:
                         st.metric("Duration", str(duration).split('.')[0])
-                    
+
                     # Create results dataframe
                     results_df = pd.DataFrame(results)
-                    
+
+                    # Show partial leads if any (profile switched but tag removal failed)
+                    if partial_count > 0:
+                        st.warning(f"⚠️ {partial_count} leads had profile switched but tag removal failed")
+                        partial_df = results_df[results_df['Status'] == 'PARTIAL']
+                        st.dataframe(partial_df, use_container_width=True)
+
                     # Show failed leads if any
                     if failed_count > 0:
                         st.warning(f"⚠️ {failed_count} leads failed to process")
