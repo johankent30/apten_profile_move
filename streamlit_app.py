@@ -302,6 +302,7 @@ def process_csv(df: pd.DataFrame, api_key: str):
 def main():
     st.title("🔄 Apten Profile Switcher")
     st.markdown("Upload a CSV file to switch customer profiles and clear all tags in bulk")
+    st.info("✨ **v1.1** — now also removes **all existing tags** from each lead after switching their profile.")
 
     # Instructions
     with st.expander("📋 Instructions", expanded=False):
@@ -421,7 +422,7 @@ def main():
     st.markdown(
         """
         <div style='text-align: center; color: #666;'>
-        Apten Profile Switcher v1.0
+        Apten Profile Switcher v1.1
         </div>
         """,
         unsafe_allow_html=True
